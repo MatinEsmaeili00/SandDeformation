@@ -107,6 +107,34 @@ PendingImpacts.Reset();
 A frame of latency on a take-off puff would be visible; the character has
 already left the ground.
 
+## Footfalls kick the wave field on the rising edge only
+
+A planted foot stays planted for many frames. Injecting the wave impulse on
+every one of them doesn't just make walking loud — it drives the wave field to
+a steady state:
+
+```
+v_{n+1} = (v_n + I)·(1 − d·Δt)      →      v* ≈ I / (d·Δt)
+```
+
+At `I = 90`, damping `0.6` and 60 fps that's about **9,000 units/second** —
+standing still would ring harder than a landing, and lowering the damping
+(which is what makes rings travel) makes it dramatically worse.
+
+So the impulse fires only the frame a foot first touches down:
+
+```cpp
+const bool bJustPlanted = !PlantedSockets.Contains(Socket);
+Contact.RippleImpulse = bJustPlanted ? FootprintRippleImpulse * Strength : 0.0f;
+```
+
+`PlantedSockets` is rebuilt each frame from the sockets that traced a hit, so a
+foot that lifts drops out without a second pass. The *depression* still applies
+every frame — that part is a state, and pressing a foot into sand continuously
+is correct. Only the wave kick is an event.
+
+This is the same state-versus-event distinction as landing, one level down.
+
 ## What an impact does
 
 Three things, and they're deliberately separate:

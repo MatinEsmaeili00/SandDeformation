@@ -76,6 +76,22 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Ripples", meta = (ClampMin = "0.0"))
 	float DisturbanceDecay;
 
+	/**
+	 * How many times the simulation runs per frame, each at DeltaTime/N.
+	 *
+	 * This is the setting that decides whether ripples actually travel. An
+	 * explicit wave solver is stability-capped at 0.7 * texel / dt - about
+	 * 168 cm/s at the default 4cm texels and 60fps - so with one step a ring
+	 * dies less than a metre from the impact no matter how high you set
+	 * RippleSpeed. Each sub-step raises that ceiling and advances the wave
+	 * further, both linearly in N.
+	 *
+	 * Costs N dispatches of the simulate pass per frame. 4 is a good balance;
+	 * 1 reverts to the old single-step behaviour.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Ripples", meta = (ClampMin = "1", ClampMax = "16"))
+	int32 RippleSubSteps;
+
 	// --- Shading ----------------------------------------------------------
 
 	/** Scales the slope baked into the output normals. Pure look control. */

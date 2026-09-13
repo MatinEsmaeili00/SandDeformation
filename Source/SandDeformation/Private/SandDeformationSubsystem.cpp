@@ -26,6 +26,7 @@ void USandDeformationSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	RippleSpeed          = Settings.RippleSpeed;
 	RippleDamping        = Settings.RippleDamping;
 	DisturbanceDecay     = Settings.DisturbanceDecay;
+	RippleSubSteps       = Settings.RippleSubSteps;
 	HeightRestoreRate    = Settings.HeightRestoreRate;
 	NormalStrength       = Settings.NormalStrength;
 	HeightScale          = Settings.HeightScale;
@@ -416,6 +417,7 @@ void USandDeformationSubsystem::Tick(float DeltaTime)
 	Params.DisturbanceDecay = DisturbanceDecay;
 	Params.HeightRestoreRate = HeightRestoreRate;
 	Params.NormalStrength = NormalStrength;
+	Params.SubSteps = FMath::Clamp(RippleSubSteps, 1, 16);
 	Params.Deformers = MoveTemp(GPUDeformers);
 
 	// The RHI textures are resolved on the render thread rather than here: a
@@ -431,7 +433,13 @@ void USandDeformationSubsystem::Tick(float DeltaTime)
 			SandDeformation::Dispatch_RenderThread(RHICmdList, Params);
 		});
 
-	CurrentStateIndex = 1 - CurrentStateIndex;
+	// The dispatch ping-pongs once per sub-step, so the newest state ends up
+	// back in the texture we started from whenever the count is even. Flipping
+	// unconditionally here would read a one-sub-step-stale buffer next frame.
+	if (Params.SubSteps % 2 == 1)
+	{
+		CurrentStateIndex = 1 - CurrentStateIndex;
+	}
 	bFirstFrame = false;
 
 	PushMaterialParameters();

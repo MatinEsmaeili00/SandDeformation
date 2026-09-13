@@ -180,6 +180,61 @@ const float Speed = min(RippleSpeed, MaxStableSpeed);
 At the defaults — 4 cm texels, 60 fps — the ceiling is about
 `0.7 × 4 × 60 ≈ 168 cm/s`, so the default 120 is comfortably inside it.
 
+### The CFL condition is also why ripples need sub-stepping
+
+The clamp keeps the solver *stable*, but it has a second consequence that is
+easy to miss and ruins the effect: **it caps how far a ripple can travel.**
+
+Work it out at the defaults — 4 cm texels, 60 fps:
+
+```
+speed cap  = 0.7 × 4 cm / (1/60 s)  ≈ 168 cm/s
+wave life  = 1 / damping = 1 / 1.5  ≈ 0.67 s
+distance   = 168 × 0.67             ≈ 110 cm
+```
+
+**A ring dies about a metre from the impact**, and no amount of raising
+`RippleSpeed` helps, because the clamp throws the extra away. That's not a
+tuning problem, it's a structural one.
+
+Worse, the obvious fix makes it worse: raising resolution or shrinking the
+region gives *smaller* texels, which *lowers* the cap. Finer detail costs wave
+speed.
+
+The way out is to shorten the timestep instead. Run the simulation **N times
+per frame** at `Δt/N`:
+
+```
+speed cap  = 0.7 × Δx / (Δt/N)  =  N × (0.7 × Δx / Δt)
+```
+
+The ceiling and the distance covered per frame both scale linearly with N. At
+N = 4 the cap goes from 168 to about 670 cm/s, and with damping at 0.6 a ring
+now travels roughly `450 × (1/0.6) ≈ 7.5 metres` — across the whole visible
+area, which is what you actually want to see.
+
+**Sub-stepping has to be N separate dispatches, not a loop inside the shader.**
+Each iteration reads its neighbours, and there is no way to synchronise every
+thread across the whole grid mid-kernel — thread A cannot wait for thread B to
+finish writing before reading it. So the pass is dispatched N times, ping-ponging
+between the two state textures each time.
+
+Two details fall out of that:
+
+- **Reprojection and stamping belong to the frame, not to the sub-step.** They
+  happen on the first iteration only. After that the region offset is zero
+  (which makes the reprojection an exact identity sample at texel centres) and
+  there are no deformers left to stamp. Stamping on every sub-step would inject
+  the impulse N times.
+- **The ping-pong parity matters.** With an even N the newest state ends up
+  back in the texture the frame started from, so the CPU-side index must only
+  flip when N is odd — see
+  [doc 4](04-cpp-reference.md#the-ping-pong-parity).
+
+Everything else — slump, damping, disturbance decay, wind — is rate-per-second
+and integrated with the same `Δt/N`, so running N times produces the same total
+change. Only the wave solver actually gains from the finer steps.
+
 And the timestep itself is clamped:
 
 ```hlsl

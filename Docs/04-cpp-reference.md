@@ -61,10 +61,45 @@ mistake in the HLSL thread-group size would be silent. That's why the group
 size is a single shared constant used by both `GetGroupCount` and the
 `THREADS_X`/`THREADS_Y` defines.
 
-**Pass 2 reads what pass 1 wrote.** `NextStateRDG` is the UAV output of pass 1
-and the SRV input of pass 2. RDG sees that dependency from the parameter
-declarations and inserts the barrier and ordering itself — the main reason to
-use RDG rather than raw RHI dispatches.
+**Pass 2 reads what pass 1 wrote.** The final state texture is the UAV output
+of the last simulate dispatch and the SRV input of the normals pass. RDG sees
+that dependency from the parameter declarations and inserts the barrier and
+ordering itself — the main reason to use RDG rather than raw RHI dispatches.
+With sub-stepping there are N such dependencies chained back to back, and RDG
+handles the whole chain without any explicit barriers in our code.
+
+### The ping-pong parity
+
+The simulate pass is dispatched `SubSteps` times, alternating source and
+destination:
+
+```cpp
+for (int32 Step = 0; Step < SubSteps; ++Step)
+{
+    /* dispatch SrcTexture -> DstUAV */
+    Swap(SrcTexture, DstTexture);
+    Swap(SrcUAV, DstUAV);
+}
+// after the final swap, SrcTexture holds the newest state
+```
+
+Because it swaps once per sub-step, **an even count lands the newest state
+back in the texture the frame started from.** So the CPU-side index can't flip
+unconditionally:
+
+```cpp
+if (Params.SubSteps % 2 == 1)
+{
+    CurrentStateIndex = 1 - CurrentStateIndex;
+}
+```
+
+Getting this wrong doesn't crash — it silently reads a one-sub-step-stale
+buffer every frame, which looks like ripples that stutter or lose energy for no
+apparent reason. Exactly the class of bug that is miserable to track down from
+the symptom, which is why it's worth stating plainly.
+
+Why [sub-stepping exists at all](02-sand-physics.md#the-cfl-condition-is-also-why-ripples-need-sub-stepping).
 
 ## `USandDeformationSettings`
 

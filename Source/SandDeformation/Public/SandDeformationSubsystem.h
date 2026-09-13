@@ -101,22 +101,30 @@ public:
 	float SlumpRate = 6.0f;
 
 	UPROPERTY(BlueprintReadWrite, Category = "Sand Deformation|Settings")
-	float RippleSpeed = 120.0f;
+	float RippleSpeed = 450.0f;
 
 	UPROPERTY(BlueprintReadWrite, Category = "Sand Deformation|Settings")
-	float RippleDamping = 1.5f;
+	float RippleDamping = 0.6f;
 
 	UPROPERTY(BlueprintReadWrite, Category = "Sand Deformation|Settings")
-	float DisturbanceDecay = 0.8f;
+	float DisturbanceDecay = 0.35f;
 
 	UPROPERTY(BlueprintReadWrite, Category = "Sand Deformation|Settings")
 	float HeightRestoreRate = 0.0f;
 
 	UPROPERTY(BlueprintReadWrite, Category = "Sand Deformation|Settings")
-	float NormalStrength = 1.0f;
+	float NormalStrength = 3.5f;
 
 	UPROPERTY(BlueprintReadWrite, Category = "Sand Deformation|Settings")
 	float HeightScale = 1.0f;
+
+	/**
+	 * Simulation iterations per frame. This is what lets ripples travel: the
+	 * wave solver is stability-capped at 0.7 * texel / dt, so with one step a
+	 * ring dies within a metre no matter how high RippleSpeed goes.
+	 */
+	UPROPERTY(BlueprintReadWrite, Category = "Sand Deformation|Settings")
+	int32 RippleSubSteps = 4;
 
 private:
 	void EnsureRenderTargets();

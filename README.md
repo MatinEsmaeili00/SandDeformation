@@ -138,9 +138,10 @@ matter most:
 |---|---|---|
 | `AngleOfReposeDegrees` | 34 | Steepest slope sand holds. Lower = runs like a fluid; higher = holds walls like soil. |
 | `SlumpRate` | 6 | How fast over-steep slopes collapse. |
-| `RippleSpeed` | 120 | Wave speed. Auto-clamped to whatever the grid can carry stably. |
-| `RippleDamping` | 1.5 | Low = rings travel far; high = they die at the impact. |
-| `RegionSizeWorld` | 4096 | World units covered. **Shrink this before raising resolution** — it's the cheapest way to sharpen detail. |
+| `RippleSpeed` | 450 | Wave speed. Clamped in-shader to what the grid can carry stably. |
+| `RippleSubSteps` | 4 | Simulation iterations per frame. **This is what lets ripples travel at all** - at 1 a ring dies within a metre. |
+| `RippleDamping` | 0.6 | Low = rings travel far; high = they die at the impact. |
+| `RegionSizeWorld` | 4096 | World units covered. Shrinking it sharpens detail but **lowers the ripple speed cap** - see doc 2. |
 | `HeightRestoreRate` | 0 | Wind flattening the surface. 0 = marks last forever. |
 
 ## Known limitations

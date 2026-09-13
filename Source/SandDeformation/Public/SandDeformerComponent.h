@@ -117,18 +117,18 @@ public:
 
 	/** World units a footfall presses down. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sand Deformation|Footfall")
-	float FootprintDepth = 5.0f;
+	float FootprintDepth = 8.0f;
 
 	/** World units of sand pushed up around a footfall. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sand Deformation|Footfall")
-	float FootprintRimHeight = 1.5f;
+	float FootprintRimHeight = 2.5f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sand Deformation|Footfall")
 	float FootprintRimWidth = 10.0f;
 
 	/** Small wave kick per footfall, so walking leaves faint ripples. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sand Deformation|Footfall")
-	float FootprintRippleImpulse = 12.0f;
+	float FootprintRippleImpulse = 90.0f;
 
 	/** Horizontal speed (cm/s) at which footfalls reach full strength. Below this they fade but never vanish. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sand Deformation|Footfall", meta = (ClampMin = "1.0"))
@@ -145,7 +145,7 @@ public:
 
 	/** Downward speed (cm/s) at which a landing starts to register at all. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sand Deformation|Impact", meta = (ClampMin = "0.0"))
-	float MinLandingSpeed = 250.0f;
+	float MinLandingSpeed = 150.0f;
 
 	/** Downward speed (cm/s) at which a landing is at full strength. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sand Deformation|Impact", meta = (ClampMin = "1.0"))
@@ -156,17 +156,17 @@ public:
 
 	/** World units a full-strength landing digs out. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sand Deformation|Impact")
-	float ImpactDepth = 14.0f;
+	float ImpactDepth = 30.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sand Deformation|Impact")
-	float ImpactRimHeight = 6.0f;
+	float ImpactRimHeight = 12.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sand Deformation|Impact")
 	float ImpactRimWidth = 45.0f;
 
 	/** Wave kick from a full-strength landing. This is the ring that spreads out. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sand Deformation|Impact")
-	float ImpactRippleImpulse = 260.0f;
+	float ImpactRippleImpulse = 1200.0f;
 
 	/** Relative size of the kick-off burst when the character jumps, against a full landing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sand Deformation|Impact", meta = (ClampMin = "0.0", ClampMax = "1.0"))
@@ -199,6 +199,17 @@ private:
 
 	/** Rising edge of "is falling" with upward velocity = the character just jumped. */
 	bool bWasFalling = false;
+
+	/**
+	 * Which sockets were planted last frame. The wave impulse is injected on
+	 * the rising edge only - a planted foot stays planted for many frames, and
+	 * re-injecting every one of them would pump the wave field to a steady
+	 * state of roughly impulse/(damping*dt), so standing still would ring
+	 * louder than a landing.
+	 */
+	TSet<FName> PlantedSockets;
+
+	bool bFallbackWasPlanted = false;
 
 	/** Landings arrive on a delegate, which can fire outside the subsystem's pull. Banked until then. */
 	TArray<FSandDeformationContact> PendingImpacts;

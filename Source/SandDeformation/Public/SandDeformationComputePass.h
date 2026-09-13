@@ -52,11 +52,25 @@ struct FSandDeformationDispatchParams
 
 	float			TanAngleOfRepose = 0.675f;	// tan(34 degrees)
 	float			SlumpRate = 6.0f;
-	float			RippleSpeed = 120.0f;
-	float			RippleDamping = 1.5f;
-	float			DisturbanceDecay = 0.8f;
+	float			RippleSpeed = 450.0f;
+	float			RippleDamping = 0.6f;
+	float			DisturbanceDecay = 0.35f;
 	float			HeightRestoreRate = 0.0f;
-	float			NormalStrength = 1.0f;
+	float			NormalStrength = 3.5f;
+
+	/**
+	 * How many times the simulation runs per frame, each at DeltaTime/N.
+	 *
+	 * This is what lets ripples travel. An explicit wave solver is capped by
+	 * the CFL condition at 0.7 * texel / dt, which at 4cm texels and 60fps is
+	 * only ~168 cm/s - so a ring dies less than a metre from the impact. Each
+	 * sub-step shrinks dt, raising that ceiling and advancing the wave further,
+	 * both linearly in N.
+	 *
+	 * Cost is N dispatches of the simulate pass. The normals pass still runs
+	 * once, and reprojection and stamping only happen on the first sub-step.
+	 */
+	int32			SubSteps = 4;
 
 	TArray<FSandDeformerGPU> Deformers;
 };

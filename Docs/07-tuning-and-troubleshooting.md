@@ -24,9 +24,15 @@ not sharp.
 | 2048 | ~22 | 10 m |
 | 1024 | ~44 | 5 m |
 
-**Shrink the region before you raise the resolution.** Halving the region
-doubles sharpness for free; doubling resolution costs 4× memory and bandwidth
-for the same gain. Smaller regions also reduce the reprojection blur.
+**Shrink the region before you raise the resolution** for detail: halving it
+doubles sharpness for free, where doubling resolution costs 4× memory and
+bandwidth for the same gain. Smaller regions also reduce reprojection blur.
+
+**But smaller texels lower the ripple speed cap.** The CFL limit is
+`0.7 × texel / dt`, so halving the region halves how fast waves can travel.
+If rings matter more than footprint sharpness, keep the region large, or raise
+`RippleSubSteps` to buy the ceiling back
+([why](02-sand-physics.md#the-cfl-condition-is-also-why-ripples-need-sub-stepping)).
 
 ## Sand behaviour
 
@@ -40,15 +46,16 @@ for the same gain. Smaller regions also reduce the reprojection blur.
 
 | Setting | Default | What it really does |
 |---|---|---|
-| `RippleSpeed` | 120 | Wave speed, world units/s. Auto-clamped to the CFL limit, so a huge value just means "as fast as this grid allows" ([why](02-sand-physics.md#stability-the-cfl-condition)). |
-| `RippleDamping` | 1.5 | Energy lost per second. Low = rings cross the whole region; high = they die at the impact. Also sets [how long the sim keeps running](01-architecture.md#why-sand-cant-go-idle). |
-| `DisturbanceDecay` | 0.8 | How fast the 0..1 disturbed mask fades. |
+| `RippleSpeed` | 450 | Wave speed, world units/s. Clamped to the CFL limit, so a huge value just means "as fast as this grid allows" ([why](02-sand-physics.md#stability-the-cfl-condition)). |
+| `RippleSubSteps` | 4 | Simulation iterations per frame. **The setting that decides whether ripples travel at all** - at 1 a ring dies within a metre no matter what RippleSpeed says ([why](02-sand-physics.md#the-cfl-condition-is-also-why-ripples-need-sub-stepping)). Costs N dispatches. |
+| `RippleDamping` | 0.6 | Energy lost per second. Low = rings cross the whole region; high = they die at the impact. Also sets [how long the sim keeps running](01-architecture.md#why-sand-cant-go-idle). |
+| `DisturbanceDecay` | 0.35 | How fast the 0..1 disturbed mask fades. |
 
 ## Shading
 
 | Setting | Default | |
 |---|---|---|
-| `NormalStrength` | 1.0 | Scales XY of the normal. Pure look control; doesn't touch the simulation. |
+| `NormalStrength` | 3.5 | Scales XY of the normal. Pure look control; doesn't touch the simulation. |
 | `HeightScale` | 1.0 | Multiplier the material applies to height. Exaggerate displacement without changing physics. |
 
 ## Per-character
@@ -57,13 +64,13 @@ for the same gain. Smaller regions also reduce the reprojection blur.
 |---|---|---|
 | `ContactHeight` | 20 | How close a foot socket must be to the ground to count as planted. **See below.** |
 | `TraceDownDistance` | 60 | How far below the socket to look for ground. |
-| `FootprintRadius` / `Depth` | 22 / 5 | Footfall size, world units. |
-| `FootprintRimHeight` / `RimWidth` | 1.5 / 10 | Sand pushed up around a footfall. |
-| `FootprintRippleImpulse` | 12 | Faint ripples from walking. |
+| `FootprintRadius` / `Depth` | 22 / 8 | Footfall size, world units. |
+| `FootprintRimHeight` / `RimWidth` | 2.5 / 10 | Sand pushed up around a footfall. |
+| `FootprintRippleImpulse` | 90 | Ripples from walking. Fires on the frame a foot first lands, not every frame it stays down. |
 | `MinSpeedForFullStrength` | 80 | Speed for a full-strength footfall; never fades below 0.35. |
-| `MinLandingSpeed` / `MaxLandingSpeed` | 250 / 1200 | Fall speed ramp for impact strength. |
-| `ImpactRadius` / `Depth` | 70 / 14 | Landing crater. |
-| `ImpactRippleImpulse` | 260 | **The ring that spreads out.** Raise this first if impacts feel weak. |
+| `MinLandingSpeed` / `MaxLandingSpeed` | 150 / 1200 | Fall speed ramp for impact strength. |
+| `ImpactRadius` / `Depth` | 70 / 30 | Landing crater. |
+| `ImpactRippleImpulse` | 1200 | **The ring that spreads out.** Raise this first if impacts feel weak. |
 | `JumpImpactScale` | 0.45 | Take-off puff size relative to a full landing. |
 
 ---
@@ -135,7 +142,11 @@ angle of repose fight each other by design; that's the physics.
 ## Impacts dig a hole but there's no visible ring
 
 `ImpactRippleImpulse` too low, or `RippleDamping` too high. The ring is the
-part that reads in motion — start at 400+ and bring it down.
+part that reads in motion.
+
+If the ring is there but dies almost immediately, the cause is `RippleSubSteps`
+rather than the impulse - at 1 the CFL cap confines a wave to about a metre no
+matter how hard you hit it.
 
 Also check the material is actually using the height channel; the ring is a
 height change, so a material that only reads normals will show it weakly.

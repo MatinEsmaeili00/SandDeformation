@@ -197,6 +197,10 @@ void USandDeformerComponent::UpdateAndGatherContacts(float DeltaTime, TArray<FSa
 	USkeletalMeshComponent* SkelMesh = FindSkeletalMesh();
 	bool bAnyFootContact = false;
 
+	// Sockets planted this frame, so the set can be swapped in at the end and
+	// any foot that lifted is dropped without a second pass.
+	TSet<FName> PlantedThisFrame;
+
 	if (SkelMesh)
 	{
 		FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(SandDeformerFootTrace), /*bTraceComplex=*/false, Owner);
@@ -218,6 +222,14 @@ void USandDeformerComponent::UpdateAndGatherContacts(float DeltaTime, TArray<FSa
 				if (SocketLoc.Z - Hit.Location.Z <= ContactHeight)
 				{
 					bAnyFootContact = true;
+					PlantedThisFrame.Add(Socket);
+
+					// Only the frame the foot first touches down kicks the wave
+					// field. A planted foot stays planted for many frames, and
+					// re-injecting each one drives the wave to a steady state of
+					// roughly impulse/(damping*dt) - so standing still would ring
+					// harder than a landing.
+					const bool bJustPlanted = !PlantedSockets.Contains(Socket);
 
 					FSandDeformationContact Contact;
 					Contact.WorldLocation = Hit.Location;
@@ -225,7 +237,7 @@ void USandDeformerComponent::UpdateAndGatherContacts(float DeltaTime, TArray<FSa
 					Contact.Depth = FootprintDepth;
 					Contact.RimHeight = FootprintRimHeight;
 					Contact.RimWidth = FootprintRimWidth;
-					Contact.RippleImpulse = FootprintRippleImpulse * Strength;
+					Contact.RippleImpulse = bJustPlanted ? FootprintRippleImpulse * Strength : 0.0f;
 					Contact.Strength = Strength;
 					OutContacts.Add(Contact);
 				}
@@ -244,8 +256,17 @@ void USandDeformerComponent::UpdateAndGatherContacts(float DeltaTime, TArray<FSa
 		Contact.Depth = FootprintDepth;
 		Contact.RimHeight = FootprintRimHeight;
 		Contact.RimWidth = FootprintRimWidth;
-		Contact.RippleImpulse = FootprintRippleImpulse * Strength;
+		// Same rising-edge rule as the skeletal path.
+		Contact.RippleImpulse = bFallbackWasPlanted ? 0.0f : FootprintRippleImpulse * Strength;
 		Contact.Strength = Strength;
 		OutContacts.Add(Contact);
+
+		bFallbackWasPlanted = true;
 	}
+	else
+	{
+		bFallbackWasPlanted = false;
+	}
+
+	PlantedSockets = MoveTemp(PlantedThisFrame);
 }
