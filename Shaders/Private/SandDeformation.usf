@@ -1,0 +1,272 @@
+// Sand deformation compute shaders.
+//
+// Two passes run every frame:
+//
+//   SandSimulateCS - maintains a persistent, world-anchored sand surface.
+//                    It reprojects last frame's state into this frame's
+//                    region, lets over-steep slopes collapse (angle of
+//                    repose), integrates a wave equation for ripples, then
+//                    stamps every active deformer.
+//
+//   SandNormalsCS  - combines the static surface and the ripple layer into
+//                    the RGBA texture the material samples.
+//
+// Height convention: heights are SIGNED WORLD UNITS measuring the surface
+// against flat rest level. Positive is piled up, negative is dug out. That is
+// the opposite of the companion snow plugin, deliberately: sand slumps, and
+// "material flows downhill" is only simple to write when up is positive.
+//
+// State layout (RGBA32F, ping-ponged):
+//   R = Height          persistent surface displacement, world units
+//   G = RippleHeight    transient wave displacement, world units
+//   B = RippleVelocity  wave velocity, world units/second
+//   A = Disturbance     0..1, decays; drives material FX and particle cues
+
+#include "/Engine/Private/Common.ush"
+
+// Must match FSandDeformerGPU in SandDeformationComputePass.h exactly.
+struct FSandDeformerGPU
+{
+	float2 LocalCenter;		// XY relative to the current region centre, world units
+	float  Radius;			// world units
+	float  Depth;			// world units this presses DOWN
+	float  RimHeight;		// world units piled up outside the core
+	float  RimWidth;		// world units the rim spans
+	float  RippleImpulse;	// world units/second injected into the wave field
+	float  Strength;		// 0..1 master multiplier
+};
+
+// ---------------------------------------------------------------------------
+// Simulate pass
+// ---------------------------------------------------------------------------
+
+Texture2D<float4>					PrevStateTexture;
+SamplerState						PrevStateSampler;
+RWTexture2D<float4>					OutStateTexture;
+StructuredBuffer<FSandDeformerGPU>	Deformers;
+
+int2	TextureSize;
+float	RegionSize;				// world units covered by the whole texture
+float2	RegionOffsetFromPrev;	// CurrentRegionCentre - PreviousRegionCentre
+int		NumDeformers;
+float	DeltaTime;
+float	ClearMask;				// 0 wipes the buffer this frame, 1 keeps it
+float	TanAngleOfRepose;		// tan() of the steepest slope dry sand holds
+float	SlumpRate;				// how fast excess slope collapses, per second
+float	RippleSpeed;			// wave propagation speed, world units/second
+float	RippleDamping;			// wave energy lost per second
+float	DisturbanceDecay;		// how fast the disturbance mask fades, per second
+float	HeightRestoreRate;		// wind slowly flattening the surface, units/second
+
+/**
+ * Reads one texel of last frame's state at the world position this frame's
+ * texel covers. Every neighbour read goes through here, so the whole stencil
+ * is reprojected consistently rather than mixing this frame's grid with last
+ * frame's contents.
+ */
+float4 LoadReprojected(int2 Pixel)
+{
+	const float2 UV = (float2(Pixel) + 0.5f) / float2(TextureSize);
+	const float2 LocalXY = (UV - 0.5f) * RegionSize;
+	const float2 PrevUV = (LocalXY + RegionOffsetFromPrev) / RegionSize + 0.5f;
+
+	// Outside means this world position was not covered last frame - it has
+	// just scrolled in, so it is undisturbed sand.
+	if (any(PrevUV <= 0.0f) || any(PrevUV >= 1.0f))
+	{
+		return float4(0.0f, 0.0f, 0.0f, 0.0f);
+	}
+
+	return PrevStateTexture.SampleLevel(PrevStateSampler, PrevUV, 0) * ClearMask;
+}
+
+[numthreads(THREADS_X, THREADS_Y, 1)]
+void SandSimulateCS(uint3 DTid : SV_DispatchThreadID)
+{
+	const int2 Pixel = int2(DTid.xy);
+	if (any(Pixel >= TextureSize))
+	{
+		return;
+	}
+
+	const int2 MaxPixel = TextureSize - 1;
+
+	const float4 StateC = LoadReprojected(Pixel);
+	const float4 StateL = LoadReprojected(int2(max(Pixel.x - 1, 0),           Pixel.y));
+	const float4 StateR = LoadReprojected(int2(min(Pixel.x + 1, MaxPixel.x),  Pixel.y));
+	const float4 StateU = LoadReprojected(int2(Pixel.x, max(Pixel.y - 1, 0)));
+	const float4 StateD = LoadReprojected(int2(Pixel.x, min(Pixel.y + 1, MaxPixel.y)));
+
+	float Height        = StateC.r;
+	float RippleHeight  = StateC.g;
+	float RippleVel     = StateC.b;
+	float Disturbance   = StateC.a;
+
+	// A frame hitch must not be allowed to blow the integrators up. Clamping
+	// the step makes a stall look like slow motion instead of an explosion.
+	const float Dt = min(DeltaTime, 1.0f / 30.0f);
+
+	const float2 TexelWorld = RegionSize / float2(TextureSize);
+	const float  Dx = TexelWorld.x;
+
+	// --- Slumping: the angle of repose ------------------------------------
+	//
+	// Dry sand cannot hold a slope steeper than ~34 degrees; pile it higher
+	// and the face collapses. So for each neighbour, any height difference
+	// beyond what that angle allows is moved downhill.
+	//
+	// This is exactly conservative: for a pair (A,B) the difference A-B and
+	// B-A are equal and opposite, so whatever A gives away, B receives on its
+	// own thread. No sand is created or destroyed.
+	{
+		const float MaxDiff = TanAngleOfRepose * Dx;
+		const float Rate = saturate(SlumpRate * Dt) * 0.25f;   // 0.25 = one quarter per neighbour
+
+		float Flow = 0.0f;
+		float4 Neighbours = float4(StateL.r, StateR.r, StateU.r, StateD.r);
+
+		[unroll]
+		for (int n = 0; n < 4; ++n)
+		{
+			const float Diff = Height - Neighbours[n];
+			if (Diff > MaxDiff)
+			{
+				Flow -= (Diff - MaxDiff) * Rate;    // this texel is too high: shed sand
+			}
+			else if (Diff < -MaxDiff)
+			{
+				Flow += (-Diff - MaxDiff) * Rate;   // neighbour is too high: receive it
+			}
+		}
+
+		Height += Flow;
+	}
+
+	// --- Ripples: a 2D wave equation --------------------------------------
+	//
+	//   d2h/dt2 = c^2 * laplacian(h)
+	//
+	// integrated as velocity so it only needs one previous state rather than
+	// two. The laplacian is the standard 5-point stencil.
+	{
+		const float Laplacian =
+			(StateL.g + StateR.g + StateU.g + StateD.g - 4.0f * RippleHeight) / (Dx * Dx);
+
+		// CFL condition. An explicit wave solver is only stable while
+		// c * dt / dx stays below ~0.7 in 2D; past that it diverges within a
+		// few frames. Rather than trust whoever typed the speed in, clamp it
+		// to whatever this texel size and frame time can actually carry.
+		const float MaxStableSpeed = 0.7f * Dx / max(Dt, 1e-5f);
+		const float Speed = min(RippleSpeed, MaxStableSpeed);
+
+		RippleVel += Speed * Speed * Laplacian * Dt;
+		RippleVel *= saturate(1.0f - RippleDamping * Dt);
+		RippleHeight += RippleVel * Dt;
+	}
+
+	// --- Wind slowly flattening everything --------------------------------
+	if (HeightRestoreRate > 0.0f)
+	{
+		const float Restore = HeightRestoreRate * Dt;
+		Height = (Height > 0.0f) ? max(Height - Restore, 0.0f) : min(Height + Restore, 0.0f);
+	}
+
+	Disturbance = max(Disturbance - DisturbanceDecay * Dt, 0.0f);
+
+	// --- Stamp the deformers ----------------------------------------------
+	const float2 UV = (float2(Pixel) + 0.5f) / float2(TextureSize);
+	const float2 LocalXY = (UV - 0.5f) * RegionSize;
+
+	for (int i = 0; i < NumDeformers; ++i)
+	{
+		const FSandDeformerGPU Def = Deformers[i];
+
+		const float Dist = length(LocalXY - Def.LocalCenter);
+		const float Outer = Def.Radius + Def.RimWidth;
+		if (Dist > Outer)
+		{
+			continue;
+		}
+
+		if (Dist <= Def.Radius)
+		{
+			// smoothstep rather than a pow curve: sand collapses into a bowl
+			// with soft shoulders, not the crisp cone a footprint leaves in snow.
+			const float T = 1.0f - saturate(Dist / max(Def.Radius, 0.001f));
+			const float Press = T * T * (3.0f - 2.0f * T);
+
+			Height = min(Height, -Press * Def.Depth * Def.Strength);
+			Disturbance = max(Disturbance, Press * Def.Strength);
+		}
+		else if (Def.RimHeight > 0.0f)
+		{
+			// Sand displaced out of the hole piles into a ring. Unlike snow
+			// this is NOT gated on undisturbed ground - the slump pass above
+			// is what stops it building unphysically, by collapsing it back.
+			const float Ring = sin(saturate((Dist - Def.Radius) / max(Def.RimWidth, 0.001f)) * PI);
+
+			Height = max(Height, Ring * Def.RimHeight * Def.Strength);
+			Disturbance = max(Disturbance, Ring * Def.Strength * 0.5f);
+		}
+
+		// An impact also kicks the wave field. This is what makes a landing
+		// send a ring spreading outwards instead of just digging a hole.
+		if (Def.RippleImpulse != 0.0f)
+		{
+			const float Falloff = 1.0f - saturate(Dist / max(Outer, 0.001f));
+			RippleVel += Def.RippleImpulse * Def.Strength * Falloff;
+		}
+	}
+
+	OutStateTexture[Pixel] = float4(Height, RippleHeight, RippleVel, saturate(Disturbance));
+}
+
+// ---------------------------------------------------------------------------
+// Normals pass
+// ---------------------------------------------------------------------------
+
+Texture2D<float4>	StateTexture;
+RWTexture2D<float4>	OutSandDataTexture;
+
+float	NormalStrength;
+
+/** Total visible surface height at a texel: static displacement plus ripples. */
+float TotalHeight(int2 Pixel)
+{
+	const float4 State = StateTexture.Load(int3(Pixel, 0));
+	return State.r + State.g;
+}
+
+[numthreads(THREADS_X, THREADS_Y, 1)]
+void SandNormalsCS(uint3 DTid : SV_DispatchThreadID)
+{
+	const int2 Pixel = int2(DTid.xy);
+	if (any(Pixel >= TextureSize))
+	{
+		return;
+	}
+
+	const int2 MaxPixel = TextureSize - 1;
+
+	const float HC = TotalHeight(Pixel);
+	const float HL = TotalHeight(int2(max(Pixel.x - 1, 0),          Pixel.y));
+	const float HR = TotalHeight(int2(min(Pixel.x + 1, MaxPixel.x), Pixel.y));
+	const float HU = TotalHeight(int2(Pixel.x, max(Pixel.y - 1, 0)));
+	const float HD = TotalHeight(int2(Pixel.x, min(Pixel.y + 1, MaxPixel.y)));
+
+	const float2 TexelWorld = RegionSize / float2(TextureSize);
+
+	// Height is already the surface Z in world units, so the gradient is taken
+	// directly - no sign flip, unlike the snow plugin where +1 meant "pressed
+	// down by MaxDepth".
+	const float DzDx = (HR - HL) / (2.0f * TexelWorld.x);
+	const float DzDy = (HD - HU) / (2.0f * TexelWorld.y);
+
+	// For a height field z = f(x,y) the surface tangents are (1,0,dz/dx) and
+	// (0,1,dz/dy); their cross product is (-dz/dx, -dz/dy, 1).
+	const float3 Normal = normalize(float3(-DzDx * NormalStrength, -DzDy * NormalStrength, 1.0f));
+
+	const float Disturbance = StateTexture.Load(int3(Pixel, 0)).a;
+
+	OutSandDataTexture[Pixel] = float4(HC, Normal.x, Normal.y, Disturbance);
+}
