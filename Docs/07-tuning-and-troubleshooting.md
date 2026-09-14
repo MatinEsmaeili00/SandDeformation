@@ -49,7 +49,29 @@ If rings matter more than footprint sharpness, keep the region large, or raise
 | `RippleSpeed` | 450 | Wave speed, world units/s. Clamped to the CFL limit, so a huge value just means "as fast as this grid allows" ([why](02-sand-physics.md#stability-the-cfl-condition)). |
 | `RippleSubSteps` | 4 | Simulation iterations per frame. **The setting that decides whether ripples travel at all** - at 1 a ring dies within a metre no matter what RippleSpeed says ([why](02-sand-physics.md#the-cfl-condition-is-also-why-ripples-need-sub-stepping)). Costs N dispatches. |
 | `RippleDamping` | 0.6 | Energy lost per second. Low = rings cross the whole region; high = they die at the impact. Also sets [how long the sim keeps running](01-architecture.md#why-sand-cant-go-idle). |
+| `RippleImpulseScale` | 2.5 | Multiplies every impulse, from every source. Changes the energy actually injected, so it changes how far rings travel as well as how tall they are. |
+| `RippleVisualScale` | 3.0 | Exaggerates the ripple layer **in the output texture only**. Never fed back into state, so it cannot destabilise the solver at any value. |
 | `DisturbanceDecay` | 0.35 | How fast the 0..1 disturbed mask fades. |
+
+### Making ripples read stronger or weaker
+
+Reach for **`RippleVisualScale` first**. It is applied in the normals pass on
+the way out and never re-enters the simulation, so it is safe at any value —
+and because the normals are derived from the scaled height, it deepens the
+shading as well as the displacement. Raising the impulse to get the same
+result risks the solver; raising this cannot.
+
+**The two scales multiply.** `RippleImpulseScale` sets how much goes in,
+`RippleVisualScale` how hard what comes out is pushed, and the visible
+amplitude is roughly their product. Halving both quarters the effect — worth
+remembering when a change lands far harder than expected. If ripples are
+overwhelming, halving both is usually a better first move than zeroing one,
+since it preserves the shape of the effect while scaling it down.
+
+Leave `RippleSpeed` and `RippleSubSteps` alone when tuning *strength*. They
+govern how far and fast rings travel, not how tall they are; turning them down
+to calm things makes ripples die at your feet instead, which reads as a broken
+effect rather than a subtle one.
 
 ## Shading
 
@@ -161,6 +183,46 @@ normals — [detail](06-material-wiring.md#the-normal-gotcha).
 Reprojection offset wrong, or the dispatch skipped on a frame where the region
 moved. A moving region must **always** dispatch —
 [detail](04-cpp-reference.md#the-settle-window).
+
+## Ripples look fine standing still, then wash out as soon as you walk
+
+The region centre isn't snapped to the texel grid. Reprojection is then a
+bilinear tap at a fractional offset — a blur applied to the whole field every
+frame you move. Footprints survive it because they're broad and constantly
+re-stamped; ripples don't, because they are precisely the high-frequency
+content a tent kernel removes.
+
+The "fine standing still" half of the symptom is the diagnostic: a stationary
+region samples exactly at texel centres, so the filter is a no-op and the
+solver looks perfect. If you only ever test from a standstill, this bug is
+invisible.
+[Derivation and fix](03-shader-walkthrough.md#why-the-region-centre-is-snapped-to-whole-texels).
+
+Turning `RippleImpulseScale` or `RippleVisualScale` up will *not* rescue this
+— the blur is proportional, so a stronger ripple simply blurs from a larger
+starting amplitude at the same rate.
+
+## The surface renders grey/default and shows nothing at all
+
+Before suspecting the simulation, check whether the **material itself
+compiled**. A material that fails to compile is silently replaced by the
+Default Material, which samples none of your data — so the sim can be running
+perfectly and you will see a flat surface regardless.
+
+Look for this in the log at load:
+
+```
+LogMaterial: Warning: [AssetLog] ...M_YourSand.uasset: Failed to compile Material
+for platform PCD3D_SM6, Default Material will be used in game.
+```
+
+The Stats panel in the Material Editor shows the same error with the offending
+node. A common one when wiring the packed output texture is a `ComponentMask`
+asking for `A` fed from a `TextureSample`'s **RGB** pin — three channels in, a
+fourth requested. Wire it from the `RGBA` pin, or take the `A` pin directly.
+
+This failure mode is worth ruling out first because no amount of tuning
+touches it, and every simulation knob appears to do nothing.
 
 ## Sand is visibly disappearing or accumulating over time
 

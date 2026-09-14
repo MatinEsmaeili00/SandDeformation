@@ -259,6 +259,42 @@ height, so waves die out *flat* rather than being dragged toward zero.
 `saturate` keeps the multiplier in 0..1, so a large damping value or long
 frame can at worst stop the wave dead rather than invert it.
 
+### The one thing velocity damping cannot do
+
+That argument is right about *energy*, and it is exactly why velocity damping
+is the main mechanism. But it has a blind spot, and the blind spot is the
+uniform mode.
+
+Damping velocity removes motion. It does not remove **position**. If the field
+has picked up a flat offset, damping the velocity brings the drift to a stop
+and then leaves the offset sitting there — permanently, because the `k = 0`
+mode has zero Laplacian and so the wave equation applies no restoring force to
+it ([the full argument](#why-the-impulse-must-integrate-to-zero)). "Waves die
+out flat" is true; it just doesn't promise they die out at *zero*.
+
+So the solver also leaks the height itself, at a fifth of the velocity
+damping:
+
+```hlsl
+RippleHeight *= saturate(1.0f - (RippleDamping * 0.2f + EdgeDamping) * Dt);
+```
+
+Kept deliberately gentle, because unlike velocity damping this *does* bias the
+surface toward zero — it attenuates genuine travelling rings along with the
+offset. It is a correction for what the impulse profile fails to cancel, not a
+primary mechanism. Turn it up and ripples die young.
+
+### Absorbing the boundary
+
+The 5-point stencil clamps its reads at the texture border. A clamped boundary
+is a perfectly reflecting wall: a ring reaching the edge inverts and travels
+back inward, and since the region is centred on the player, it converges on
+them from all sides. Ramping the damping up steeply over the outer band of
+texels absorbs the wave before it gets there — a cheap stand-in for a proper
+radiating boundary condition. The falloff is squared rather than linear
+because an abrupt change in damping is itself an impedance discontinuity, and
+impedance discontinuities are precisely what reflect waves.
+
 ### How long do ripples take to die
 
 Amplitude decays as `exp(−damping · t)`. Solving for 1% remaining:
@@ -280,14 +316,60 @@ A landing does two separate things:
 2. **Kicks the wave field** — adds velocity to `RippleVel`. Transient.
 
 ```hlsl
-const float Falloff = 1.0f - saturate(Dist / max(Outer, 0.001f));
-RippleVel += Def.RippleImpulse * Def.Strength * Falloff;
+const float U = (Dist * Dist) / (2.0f * RippleSigma * RippleSigma);
+const float Profile = (1.0f - U) * exp(-U);
+RippleVel += Def.RippleImpulse * Def.Strength * Profile;
 ```
 
 Injecting **velocity** rather than height is what produces a spreading ring.
 Adding height would raise a static bump that then sloshes. Adding velocity
 gives the surface outward momentum, and the wave equation carries it away as a
 travelling ring — which is the effect you actually recognise as an impact.
+
+### Why the impulse must integrate to zero
+
+Look again at the wave equation: `∂²h/∂t² = c²∇²h`. The forcing on any mode is
+proportional to its Laplacian. For a spatially uniform mode — `k = 0`, a flat
+lift of the entire field — the Laplacian is identically zero, so **the uniform
+mode has no restoring force whatsoever.** It is not weakly restored; it is not
+restored at all.
+
+The consequence is easy to miss and impossible to unsee. Any impulse whose
+integral over the plane is non-zero injects a permanent, irremovable offset
+into `RippleHeight`. Damping the velocity does not help: it just brings the
+drift to a halt and leaves the offset frozen. Every footstep adds a little
+more, so walking builds a ridge of ghost material along your path.
+
+So the profile is chosen to make that integral vanish. With
+`u = r²/2σ²`, so that `r dr = σ² du`:
+
+```
+∫₀^∞ (1−u)·e^(−u) · 2πr dr = 2πσ² ∫₀^∞ (1−u)e^(−u) du
+                           = 2πσ² · (1 − 1)
+                           = 0
+```
+
+using `∫₀^∞ e^(−u)du = 1` and `∫₀^∞ u·e^(−u)du = 1`. Those two integrals being
+equal is what makes the cancellation exact rather than approximate — the
+positive core is paid for precisely by the negative annulus surrounding it.
+
+This is the normalised 2D Laplacian-of-Gaussian, the same operator used as a
+blob detector in image processing, and for the same underlying reason: it is
+the shape that responds to local structure while ignoring any constant
+background.
+
+Drop the `(1−u)` and you have a plain Gaussian, whose integral is `2πσ²` —
+every bit of it net injection. The naive linear cone `1 − r/Outer` is worse
+still, being single-signed across its whole support.
+
+Physically the net-zero condition is just conservation: a footstep pushes sand
+down in one place and up in a ring around it. It does not create material. The
+maths and the intuition agree, which is usually the sign you have the right
+model rather than a tuned hack.
+
+A residual leak on `RippleHeight` still exists in the solver as a safety net,
+because truncating the annulus at a finite radius leaves a few percent of the
+integral uncancelled. But it is a mop, not a fix — the fix is the profile.
 
 ---
 

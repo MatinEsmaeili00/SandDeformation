@@ -161,6 +161,7 @@ worse surprise than ignoring a setting.
 ```
 1. EnsureRenderTargets()
 2. resolve focus actor → NewRegionCenter        (not yet committed)
+2b. SNAP NewRegionCenter to the texel grid
 3. pull contacts + impacts from every component
 4. update SettleTimeRemaining
 5. decide bNeedsDispatch — early out if false
@@ -174,6 +175,36 @@ worse surprise than ignoring a setting.
 it where the texture is still anchored, so next frame's offset is measured
 from the right place and no motion is lost. Committing earlier and then
 bailing would desynchronise the texture from its own centre.
+
+### Step 2b: snapping the region to the texel grid
+
+```cpp
+const double TexelWorldX = static_cast<double>(RegionSizeWorld) / FMath::Max(TextureResolution.X, 1);
+const double TexelWorldY = static_cast<double>(RegionSizeWorld) / FMath::Max(TextureResolution.Y, 1);
+NewRegionCenter.X = FMath::RoundToDouble(NewRegionCenter.X / TexelWorldX) * TexelWorldX;
+NewRegionCenter.Y = FMath::RoundToDouble(NewRegionCenter.Y / TexelWorldY) * TexelWorldY;
+```
+
+Four lines of CPU arithmetic that decide whether the ripple field survives
+being walked across. The shader resamples last frame's state through a
+bilinear tap; at a fractional texel offset that tap is a low-pass filter over
+the entire field, every frame. Snapping makes every offset an integer texel
+count, so the tap lands on a texel centre and returns it untouched.
+[Full derivation](03-shader-walkthrough.md#why-the-region-centre-is-snapped-to-whole-texels).
+
+**Order matters.** This has to happen before step 5, not after. `bNeedsDispatch`
+compares `NewRegionCenter` against the committed centre, and it must compare
+*snapped to snapped* — otherwise sub-texel jitter reports a move every frame
+and the sim never idles while the player breathes on the analogue stick.
+
+It must also happen before step 7's conversion to region-local space, so
+deformer positions are rebased against the same snapped centre the texture is
+anchored to. `GetSandRegionParameter` publishes that centre to the material,
+so the CPU, the GPU and the shader all agree on where the region is.
+
+Note the `double` arithmetic. `FVector2D` is double-precision in UE5, and
+rounding through `float` in a level built far from the origin would reintroduce
+exactly the sub-texel error the snap exists to remove.
 
 ### The settle window
 

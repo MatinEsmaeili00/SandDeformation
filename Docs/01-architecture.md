@@ -23,6 +23,19 @@ Derived step by step in
 The cost is fixed regardless of level size; the only thing given up is sand
 memory beyond `RegionSizeWorld / 2` from the player.
 
+**The region centre is snapped to whole texels before any of this happens.**
+That one line on the CPU is what makes the technique viable at all. Re-sampling
+at a fractional texel offset means a bilinear tap, and a bilinear tap at a
+fractional offset is a blur — applied to every texel, every frame you move. It
+costs the height field little, but it annihilates the ripple field, which is
+exactly the high-frequency detail such a filter is built to remove. Snapping
+the centre makes every offset a whole number of texels, so each tap lands dead
+on a texel centre and returns it unchanged.
+
+The symptom, if this is ever missing: ripples look perfect standing still and
+wash out within a few frames of walking.
+[The derivation and the fix](03-shader-walkthrough.md#why-the-region-centre-is-snapped-to-whole-texels).
+
 Everything inside the shader works in **region-local** coordinates rather than
 absolute world ones. A level built 500,000 units from the origin would push
 `float` into a range where consecutive representable values are over a

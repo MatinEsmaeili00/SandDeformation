@@ -94,14 +94,55 @@ Details:
 
 - **Outside 0..1** means this world position wasn't covered last frame — newly
   scrolled in, so undisturbed.
-- **`SampleLevel`, bilinear, clamped.** The offset is rarely a whole number of
-  texels. `SampleLevel` rather than `Sample` because compute shaders have no
-  implicit derivatives to choose a mip from.
+- **`SampleLevel`, bilinear, clamped.** `SampleLevel` rather than `Sample`
+  because compute shaders have no implicit derivatives to choose a mip from.
 - **`ClearMask`** is 0 on the first frame, 1 after — wipes the buffer once
   without a separate clear pass.
 
-The bilinear resample blurs slightly each frame the region moves. That's the
-standing cost of the technique; a smaller `RegionSizeWorld` reduces it.
+### Why the region centre is snapped to whole texels
+
+A bilinear tap at a *fractional* texel offset is not a lookup — it is a blur.
+It returns a weighted average of two adjacent texels, and at a half-texel
+offset, the worst case, it returns exactly their mean. That is a low-pass
+filter, and reprojection applies it to every texel of the field, every frame
+the region moves.
+
+Work out what that costs at a walking pace. The character moves ~600 cm/s
+across 4 cm texels at 60 fps, so the region scrolls 2.5 texels per frame — a
+fractional part of 0.5, the maximum-blur case, sixty times a second. The
+height channel shrugs this off: it is broad, smooth, and re-stamped by the
+deformers constantly. The ripple field does not, because the ripple field
+*is* the high-frequency content a tent kernel is designed to remove. Rings
+visibly wash out within a few frames of walking, while standing still looks
+perfect — the tell that the problem is reprojection and not the solver.
+
+The fix costs nothing and lives on the CPU, in `USandDeformationSubsystem::Tick`:
+
+```cpp
+const double TexelWorldX = static_cast<double>(RegionSizeWorld) / FMath::Max(TextureResolution.X, 1);
+NewRegionCenter.X = FMath::RoundToDouble(NewRegionCenter.X / TexelWorldX) * TexelWorldX;
+```
+
+Quantise the region centre to the texel grid and every offset becomes a whole
+number of texels. Then, with `k` the integer texel shift:
+
+```
+PrevUV = (Pixel + 0.5)/N + k/N = (Pixel + k + 0.5)/N
+```
+
+which is exactly the centre of texel `Pixel + k`. A bilinear tap landing dead
+on a texel centre has weights 1 and 0 — it returns that texel unchanged. The
+filter is still bilinear; it just no longer has anything to interpolate.
+
+The price is that the region lags the focus actor by up to half a texel, 2 cm
+at the defaults. Nothing drifts out of alignment, because the material reads
+the same snapped centre through `GetSandRegionParameter`, and deformer
+positions are rebased against it too.
+
+This is worth internalising as a general rule: **any world-anchored scrolling
+texture must snap to its own texel grid**, or it quietly destroys its own
+high-frequency content. It is the single most common bug in this family of
+techniques.
 
 ## The timestep clamp
 
@@ -151,8 +192,20 @@ const float MaxStableSpeed = 0.7f * Dx / max(Dt, 1e-5f);
 const float Speed = min(RippleSpeed, MaxStableSpeed);
 
 RippleVel += Speed * Speed * Laplacian * Dt;
-RippleVel *= saturate(1.0f - RippleDamping * Dt);
+
+const float2 EdgeTexels  = min(float2(Pixel), float2(MaxPixel - Pixel));
+const float  EdgeDist    = min(EdgeTexels.x, EdgeTexels.y);
+const float  SpongeWidth = max(float(min(TextureSize.x, TextureSize.y)) * 0.06f, 4.0f);
+const float  Sponge      = 1.0f - saturate(EdgeDist / SpongeWidth);
+const float  EdgeDamping = Sponge * Sponge * 12.0f;
+
+RippleVel *= saturate(1.0f - (RippleDamping + EdgeDamping) * Dt);
 RippleHeight += RippleVel * Dt;
+RippleHeight *= saturate(1.0f - (RippleDamping * 0.2f + EdgeDamping) * Dt);
+
+const float MaxAmplitude = Dx * 2.0f;
+RippleHeight = clamp(RippleHeight, -MaxAmplitude, MaxAmplitude);
+RippleVel    = clamp(RippleVel, -MaxAmplitude * 8.0f, MaxAmplitude * 8.0f);
 ```
 
 Semi-implicit Euler on the wave equation, with the speed clamped to the CFL
@@ -162,6 +215,33 @@ limit so the solver cannot be configured into divergence. Derived in
 Note the Laplacian reads channel `.g` (ripple height) while slump reads `.r`
 (static height). Two independent fields in one texture, each with its own
 solver — see [why they're separate](01-architecture.md#the-state-texture).
+
+Three additions to the bare wave equation, each fixing something the plain
+form gets wrong:
+
+**The sponge layer.** The stencil clamps its reads at the texture border, and
+a clamped boundary is a *perfectly reflecting wall* — a ring that reaches the
+edge turns around and comes back. Because the region is centred on the player,
+it comes back at them from every side at once. Ramping the damping up steeply
+over the outer 6% of the texture absorbs the wave before it arrives. It is the
+cheap stand-in for a proper radiating (Sommerfeld) boundary condition, and the
+squared falloff matters: a sudden jump in damping is itself an impedance
+change, and reflects.
+
+**The height leak.** Damping the velocity alone cannot remove a uniform
+offset. The `k = 0` mode — a flat lift of the whole field — has zero Laplacian
+by definition, so it feels no restoring force at all; damping velocity just
+freezes it in place. Any net impulse that survives therefore leaves a mound in
+`G` that tracks wherever the player walked and never fades. A slow
+multiplicative leak on the height itself drains it. It is kept to a fifth of
+the velocity damping so it clears the offset without noticeably shortening the
+life of a real ring — the impulse profile below is designed so there is very
+little to clear in the first place.
+
+**The clamp** is insurance and should never engage in play. Past roughly a
+texel of amplitude per texel of spacing, the surface is steeper than a 5-point
+stencil can resolve; the Laplacian starts reporting nonsense and the solver
+feeds on itself.
 
 ## Wind and disturbance decay
 
@@ -225,11 +305,51 @@ special case elsewhere is a good sign the physics is carrying its weight.
 ### The wave kick
 
 ```hlsl
-const float Falloff = 1.0f - saturate(Dist / max(Outer, 0.001f));
-RippleVel += Def.RippleImpulse * Def.Strength * Falloff;
+const float RippleSigma = max(Def.Radius, 1.0f) * 0.707f;
+const float RippleReach = RippleSigma * 3.0f;
+
+const float U = (Dist * Dist) / (2.0f * RippleSigma * RippleSigma);
+const float Profile = (1.0f - U) * exp(-U);
+RippleVel += Def.RippleImpulse * Def.Strength * Profile;
 ```
 
 Velocity, not height — [why that gives a travelling ring](02-sand-physics.md#coupling-impacts-into-the-wave-field).
+
+The *shape* matters as much as the quantity. This profile is the normalised
+2D Laplacian-of-Gaussian, and it is chosen because its integral over the plane
+is exactly zero. With `u = r²/2σ²` and the substitution `r dr = σ² du`:
+
+```
+∫₀^∞ (1−u)·e^(−u) · 2πr dr = 2πσ² ∫₀^∞ (1−u)e^(−u) du = 2πσ²·(1 − 1) = 0
+```
+
+Note how tight that is: the two integrals `∫e^(−u)du` and `∫u·e^(−u)du` are
+both exactly 1, so the positive core is paid for precisely by the negative
+annulus around it. Drop the `(1−u)` factor for a plain Gaussian and the
+integral is `2πσ²` — all of it net injection.
+
+That is the whole point, and it connects back to the height leak above: the
+`k = 0` mode has no restoring force, so whatever net volume an impulse injects
+into `G` stays there forever. A single-signed blob — which is what the old
+linear cone `1 − r/Outer` was — dumps net volume on every single footstep, and
+walking accumulates a ridge along your path. A net-zero kick launches a
+travelling ring and leaves nothing behind it.
+
+It also simply looks right. A ripple is a dip ringed by a crest, not a dome.
+
+`σ = 0.707·Radius` puts the zero crossing at `σ√2 = Radius` — exactly the
+deformer's own radius, so the core pushes over the footprint and the rebound
+begins right where the sand ends. Peak value at `r = 0` is 1, the same as the
+cone it replaces, so existing impulse magnitudes carry over unchanged.
+
+One consequence to watch: the negative annulus extends further than the
+footprint does, so the per-deformer early-out has to cover `RippleReach`, not
+just `Outer`. Clip the annulus off and the profile stops summing to zero and
+you are back to injecting DC. Widening that early-out is also why the rim
+branch needs an explicit `Dist <= Outer` guard — without it the branch runs
+out where `sin(π) = 0`, and `Height = max(Height, 0)` silently erases craters
+in a ring around every footfall. Truncation at `3σ` leaves about 4% of peak,
+which is what the height leak is there to mop up.
 
 ```hlsl
 OutStateTexture[Pixel] = float4(Height, RippleHeight, RippleVel, saturate(Disturbance));
