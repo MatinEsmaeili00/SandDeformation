@@ -126,6 +126,14 @@ public:
 	UPROPERTY(BlueprintReadWrite, Category = "Sand Deformation|Settings")
 	int32 RippleSubSteps = 4;
 
+	/** Multiplies every ripple impulse, wherever it came from. One place to scale them all. */
+	UPROPERTY(BlueprintReadWrite, Category = "Sand Deformation|Settings")
+	float RippleImpulseScale = 2.5f;
+
+	/** Exaggerates ripples in the output only. Cannot destabilise the solver at any value. */
+	UPROPERTY(BlueprintReadWrite, Category = "Sand Deformation|Settings")
+	float RippleVisualScale = 3.0f;
+
 private:
 	void EnsureRenderTargets();
 	void ReleaseRenderTargets();

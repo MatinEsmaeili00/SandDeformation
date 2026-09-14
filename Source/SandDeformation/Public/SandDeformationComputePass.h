@@ -58,6 +58,9 @@ struct FSandDeformationDispatchParams
 	float			HeightRestoreRate = 0.0f;
 	float			NormalStrength = 3.5f;
 
+	/** Multiplies the ripple layer in the output only. Safe at any value - never fed back into the sim. */
+	float			RippleVisualScale = 3.0f;
+
 	/**
 	 * How many times the simulation runs per frame, each at DeltaTime/N.
 	 *
@@ -128,6 +131,7 @@ BEGIN_SHADER_PARAMETER_STRUCT(FSandNormalsParams, )
 	SHADER_PARAMETER(FIntPoint, TextureSize)
 	SHADER_PARAMETER(float, RegionSize)
 	SHADER_PARAMETER(float, NormalStrength)
+	SHADER_PARAMETER(float, RippleVisualScale)
 END_SHADER_PARAMETER_STRUCT()
 
 class FSandNormalsCS : public FGlobalShader

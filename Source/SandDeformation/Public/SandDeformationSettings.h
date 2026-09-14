@@ -92,6 +92,31 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Ripples", meta = (ClampMin = "1", ClampMax = "16"))
 	int32 RippleSubSteps;
 
+	/**
+	 * Multiplies every ripple impulse, wherever it came from - footfalls,
+	 * landings, explosions.
+	 *
+	 * Per-source impulses live on the deformer component, which means a
+	 * Blueprint that already has the component keeps whatever value it was
+	 * created with. This is the one place that scales all of them at once, so
+	 * turning ripples up doesn't mean hunting through details panels.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Ripples", meta = (ClampMin = "0.0"))
+	float RippleImpulseScale;
+
+	/**
+	 * Exaggerates the ripple layer in the output texture. 1 is physically
+	 * honest; higher makes waves read strongly without touching the simulation.
+	 *
+	 * This is the safe way to make ripples obvious. It is applied in the
+	 * normals pass on the way out and never fed back into the state texture,
+	 * so unlike a bigger impulse it cannot affect stability at any value - and
+	 * because the normals are derived from the scaled height, it deepens the
+	 * shading as well as the displacement.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Ripples", meta = (ClampMin = "0.0"))
+	float RippleVisualScale;
+
 	// --- Shading ----------------------------------------------------------
 
 	/** Scales the slope baked into the output normals. Pure look control. */

@@ -27,6 +27,8 @@ void USandDeformationSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	RippleDamping        = Settings.RippleDamping;
 	DisturbanceDecay     = Settings.DisturbanceDecay;
 	RippleSubSteps       = Settings.RippleSubSteps;
+	RippleImpulseScale   = Settings.RippleImpulseScale;
+	RippleVisualScale    = Settings.RippleVisualScale;
 	HeightRestoreRate    = Settings.HeightRestoreRate;
 	NormalStrength       = Settings.NormalStrength;
 	HeightScale          = Settings.HeightScale;
@@ -325,7 +327,29 @@ void USandDeformationSubsystem::Tick(float DeltaTime)
 	}
 
 	const AActor* Focus = ResolveFocusActor();
-	const FVector2D NewRegionCenter = Focus ? FVector2D(Focus->GetActorLocation()) : RegionCenterWorld;
+	FVector2D NewRegionCenter = Focus ? FVector2D(Focus->GetActorLocation()) : RegionCenterWorld;
+
+	// Snap the region to whole texels.
+	//
+	// LoadReprojected pulls last frame's state through a bilinear tap. When the
+	// region has scrolled by a fractional texel that tap stops being a lookup
+	// and becomes a low-pass filter - and it runs over every texel, every
+	// frame. At a walking pace of ~600 cm/s across 4 cm texels the offset lands
+	// mid-texel, so the filter averages neighbouring pairs sixty times a
+	// second. The height channel survives it, being broad and re-stamped
+	// constantly, but the ripple field IS the high-frequency content a tent
+	// kernel destroys. That is why ripples blur away to nothing while you walk
+	// and only hold together standing still.
+	//
+	// Quantising the centre to the texel grid makes every offset an exact whole
+	// number of texels, so PrevUV lands dead on a texel centre and the bilinear
+	// tap returns that texel untouched. The region then lags the focus actor by
+	// up to half a texel - 2 cm at the defaults - and because the material
+	// reads this same snapped centre, nothing drifts out of alignment.
+	const double TexelWorldX = static_cast<double>(RegionSizeWorld) / FMath::Max(TextureResolution.X, 1);
+	const double TexelWorldY = static_cast<double>(RegionSizeWorld) / FMath::Max(TextureResolution.Y, 1);
+	NewRegionCenter.X = FMath::RoundToDouble(NewRegionCenter.X / TexelWorldX) * TexelWorldX;
+	NewRegionCenter.Y = FMath::RoundToDouble(NewRegionCenter.Y / TexelWorldY) * TexelWorldY;
 
 	TArray<FSandDeformationContact> Contacts;
 	for (auto It = RegisteredDeformers.CreateIterator(); It; ++It)
@@ -391,7 +415,7 @@ void USandDeformationSubsystem::Tick(float DeltaTime)
 		Deformer.Depth = Contact.Depth;
 		Deformer.RimHeight = Contact.RimHeight;
 		Deformer.RimWidth = Contact.RimWidth;
-		Deformer.RippleImpulse = Contact.RippleImpulse;
+		Deformer.RippleImpulse = Contact.RippleImpulse * RippleImpulseScale;
 		Deformer.Strength = Contact.Strength;
 		GPUDeformers.Add(Deformer);
 	}
@@ -400,6 +424,7 @@ void USandDeformationSubsystem::Tick(float DeltaTime)
 	for (FSandDeformerGPU& OneShot : PendingOneShotDeformers)
 	{
 		OneShot.LocalCenter -= RegionCenterFloat;
+		OneShot.RippleImpulse *= RippleImpulseScale;
 		GPUDeformers.Add(OneShot);
 	}
 	PendingOneShotDeformers.Reset();
@@ -417,6 +442,7 @@ void USandDeformationSubsystem::Tick(float DeltaTime)
 	Params.DisturbanceDecay = DisturbanceDecay;
 	Params.HeightRestoreRate = HeightRestoreRate;
 	Params.NormalStrength = NormalStrength;
+	Params.RippleVisualScale = RippleVisualScale;
 	Params.SubSteps = FMath::Clamp(RippleSubSteps, 1, 16);
 	Params.Deformers = MoveTemp(GPUDeformers);
 

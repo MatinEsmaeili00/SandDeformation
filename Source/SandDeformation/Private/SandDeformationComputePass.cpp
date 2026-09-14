@@ -124,6 +124,7 @@ void SandDeformation::Dispatch_RenderThread(FRHICommandListImmediate& RHICmdList
 		PassParameters->TextureSize = Params.TextureSize;
 		PassParameters->RegionSize = Params.RegionSize;
 		PassParameters->NormalStrength = Params.NormalStrength;
+		PassParameters->RippleVisualScale = Params.RippleVisualScale;
 
 		TShaderMapRef<FSandNormalsCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 		FComputeShaderUtils::AddPass(

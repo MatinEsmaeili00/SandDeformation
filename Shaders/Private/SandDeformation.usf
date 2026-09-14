@@ -160,8 +160,40 @@ void SandSimulateCS(uint3 DTid : SV_DispatchThreadID)
 		const float Speed = min(RippleSpeed, MaxStableSpeed);
 
 		RippleVel += Speed * Speed * Laplacian * Dt;
-		RippleVel *= saturate(1.0f - RippleDamping * Dt);
+
+		// Absorbing edge. The stencil clamps its reads at the texture border,
+		// which is a perfectly reflecting wall: a ring that reaches the edge
+		// turns around and comes back through the player, and since the region
+		// is centred on them it does that from every side at once. Ramping the
+		// damping up steeply over the outer band soaks the wave up before it
+		// arrives - the cheap stand-in for a real radiating boundary.
+		const float2 EdgeTexels  = min(float2(Pixel), float2(MaxPixel - Pixel));
+		const float  EdgeDist    = min(EdgeTexels.x, EdgeTexels.y);
+		const float  SpongeWidth = max(float(min(TextureSize.x, TextureSize.y)) * 0.06f, 4.0f);
+		const float  Sponge      = 1.0f - saturate(EdgeDist / SpongeWidth);   // 0 inside, 1 at the border
+		const float  EdgeDamping = Sponge * Sponge * 12.0f;                   // per second, at the very edge
+
+		RippleVel *= saturate(1.0f - (RippleDamping + EdgeDamping) * Dt);
 		RippleHeight += RippleVel * Dt;
+
+		// Pull the wave height back to flat, not just its velocity. The k=0
+		// mode has zero laplacian, so it feels no restoring force at all: any
+		// net impulse that survives leaves a uniform lift in G that damping the
+		// velocity can never remove, and it would sit there as a ghost mound
+		// tracking wherever the player walked. The impulse profile below is
+		// built to inject almost no k=0 to begin with; this is what clears the
+		// remainder, plus anything the region edge clips off. Kept gentle - a
+		// fifth of the velocity damping - so it drains the offset without
+		// noticeably shortening the life of a real ring.
+		RippleHeight *= saturate(1.0f - (RippleDamping * 0.2f + EdgeDamping) * Dt);
+
+		// Insurance only, and it should never engage in normal play. Past
+		// roughly a texel of amplitude per texel of spacing the surface is
+		// steeper than a 5-point stencil can resolve, so the laplacian starts
+		// reporting nonsense and the solver feeds on itself.
+		const float MaxAmplitude = Dx * 2.0f;
+		RippleHeight = clamp(RippleHeight, -MaxAmplitude, MaxAmplitude);
+		RippleVel    = clamp(RippleVel, -MaxAmplitude * 8.0f, MaxAmplitude * 8.0f);
 	}
 
 	// --- Wind slowly flattening everything --------------------------------
@@ -183,7 +215,15 @@ void SandSimulateCS(uint3 DTid : SV_DispatchThreadID)
 
 		const float Dist = length(LocalXY - Def.LocalCenter);
 		const float Outer = Def.Radius + Def.RimWidth;
-		if (Dist > Outer)
+
+		// The wave kick reaches further than the footprint does - its outer
+		// half is negative, see the profile below - so the early-out has to
+		// cover whichever of the two is wider, or that negative annulus gets
+		// clipped and the impulse stops summing to zero.
+		const float RippleSigma = max(Def.Radius, 1.0f) * 0.707f;
+		const float RippleReach = RippleSigma * 3.0f;
+		const float MaxReach = (Def.RippleImpulse != 0.0f) ? max(Outer, RippleReach) : Outer;
+		if (Dist > MaxReach)
 		{
 			continue;
 		}
@@ -198,8 +238,14 @@ void SandSimulateCS(uint3 DTid : SV_DispatchThreadID)
 			Height = min(Height, -Press * Def.Depth * Def.Strength);
 			Disturbance = max(Disturbance, Press * Def.Strength);
 		}
-		else if (Def.RimHeight > 0.0f)
+		else if (Dist <= Outer && Def.RimHeight > 0.0f)
 		{
+			// The Dist <= Outer test is load-bearing now that the early-out
+			// above can let a texel through on ripple reach alone. Without it
+			// this branch runs out where sin(PI) is 0, and the max() below
+			// would clamp every height it touches up to zero - quietly erasing
+			// craters in a ring around each footfall.
+			//
 			// Sand displaced out of the hole piles into a ring. Unlike snow
 			// this is NOT gated on undisturbed ground - the slump pass above
 			// is what stops it building unphysically, by collapsing it back.
@@ -209,12 +255,28 @@ void SandSimulateCS(uint3 DTid : SV_DispatchThreadID)
 			Disturbance = max(Disturbance, Ring * Def.Strength * 0.5f);
 		}
 
-		// An impact also kicks the wave field. This is what makes a landing
+		// An impact also kicks the wave field. This is what makes a footfall
 		// send a ring spreading outwards instead of just digging a hole.
+		//
+		// The profile is the normalised 2D Laplacian-of-Gaussian,
+		// (1 - u) * exp(-u) with u = r^2 / (2*sigma^2): a positive core paid
+		// for exactly by a negative annulus, so its integral over the plane is
+		// zero. That matters because a wave equation gives the k=0 mode no
+		// restoring force - a single-signed blob, which is what the old linear
+		// cone was, dumps net volume into G that nothing can ever take back
+		// out. A net-zero kick launches a travelling ring and leaves nothing
+		// behind it, which is also simply what a ripple is: a dip ringed by a
+		// crest, not a dome.
+		//
+		// sigma is 0.707 * Radius, which puts the zero crossing at exactly the
+		// deformer radius: the core pushes over the footprint, the rebound
+		// starts right where the sand ends. Peak value is 1 at r=0, the same
+		// as the cone it replaces, so existing impulse values carry over.
 		if (Def.RippleImpulse != 0.0f)
 		{
-			const float Falloff = 1.0f - saturate(Dist / max(Outer, 0.001f));
-			RippleVel += Def.RippleImpulse * Def.Strength * Falloff;
+			const float U = (Dist * Dist) / (2.0f * RippleSigma * RippleSigma);
+			const float Profile = (1.0f - U) * exp(-U);
+			RippleVel += Def.RippleImpulse * Def.Strength * Profile;
 		}
 	}
 
@@ -229,12 +291,21 @@ Texture2D<float4>	StateTexture;
 RWTexture2D<float4>	OutSandDataTexture;
 
 float	NormalStrength;
+float	RippleVisualScale;	// exaggerates ripples in the output only
 
-/** Total visible surface height at a texel: static displacement plus ripples. */
+/**
+ * Total visible surface height at a texel: static displacement plus ripples.
+ *
+ * RippleVisualScale multiplies the wave layer on the way OUT, so ripples can
+ * be made to read strongly without touching the simulation. Because nothing
+ * here is ever fed back into the state texture, scaling it cannot destabilise
+ * the solver - which is exactly why the exaggeration belongs here rather than
+ * in a bigger impulse.
+ */
 float TotalHeight(int2 Pixel)
 {
 	const float4 State = StateTexture.Load(int3(Pixel, 0));
-	return State.r + State.g;
+	return State.r + State.g * RippleVisualScale;
 }
 
 [numthreads(THREADS_X, THREADS_Y, 1)]
